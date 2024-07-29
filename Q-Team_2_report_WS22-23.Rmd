@@ -1,0 +1,679 @@
+---
+title: "Q-Team 2 - Report (WS22/23)"
+author: "Gregor Sommer & Yi Bei"
+date: "2023-02-19"
+output: html_document
+bibliography: Q-Team.bib
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+
+# Introduction
+Non-Hodgkin's lymphoma, is a cancer of the lymphatic system, where abnormal B cells (a type of white blood cell) divide and multiply rapidly, eventually spreading to other parts of the body. The exact cause of non-Hodgkin's lymphoma is not known, but it is believed to be a combination of genetic and environmental factors (@Mayo2022). Certain genetic mutations can cause B cells to grow and divide abnormally, leading to the development of non-Hodgkin's lymphoma (@Cerhan2015). Exposure to chemicals, radiation, or certain viruses may also increase the risk. Diagnosis are made with a biopsy of the affected lymph node. Treatment for Non-Hodgkin's lymphoma typically involves a combination of chemotherapy and radiation therapy, although other treatments such as immunotherapy, targeted therapy, and stem cell transplantation may also be used, depending on the individual case. With proper treatment, many people with non-Hodgkin's lymphoma can achieve long-term remission and good quality of life (@Mayo2022). Nevertheless, radiation and chemotherapy have drastic side-effects ranging from fatigue and hair loss to seizures, general weakness and infertility (@AmericanCancerSociety2019 & @AmericanCancerSociety2021). Thus, there is the need to examine possible other therapies.
+
+In this work, specifically the follicular lymphoma (FL) was addressed. The follicular lymphoma is a  a slow-growing subtype of non-Hodgkin's lymphoma, which originates in the follicles (small, rounded structures) of the lymph nodes (@Carbone2019).
+
+We chose to use data from the following publication:
+
+**Dissecting intratumour heterogeneity of nodal B-cell lymphomas at the transcriptional, genetic and drug-response levels** (@Roider2020a, Nat Cell Biol 22, 896–906.).
+
+The data is available under the DOI: 10.11588/data/VRJUNV.
+
+The publication consists of data from 12 different patients, with different non-Hodgink's lymphoma or reactive lymphadenitis. After evaluating the whole dataset and each diagnosis (Diffuse large B cell lymphoma = DLBCL, Follicular Lymphoma = FL, reactive Lymphadenitis = rLN, transformed Follicular Lymphoma = tFL) by its own, we decided to focus on patients with follicular lymphoma. This subset showed all the effects that the whole dataset did, but was much more feasible to process by our computers. 
+
+```{r, message=FALSE, echo=FALSE}
+library(tidyverse)
+library(Seurat)
+library(ggthemes)
+library(ggpubr)
+library(MetBrewer)
+knitr::opts_chunk$set()
+```
+```{r, message=FALSE, warning=FALSE, fig.height = 3, fig.width = 5}
+metadata = read.csv("./data/sample_sheet.csv")
+
+ggplot(metadata, aes(x=Diagnosis, fill=Sex)) + 
+geom_bar(width = 0.5) +
+theme_classic() +
+labs(x="", y="") +
+scale_fill_manual(values = met.brewer("Signac", 2), breaks=c("F", "M"),
+                  labels=c("Female", "Male")) +
+  scale_x_discrete(labels=c("Diffuse large B cell lymphoma" = "DLBCL",
+                            "Follicular Lymphoma" = "FL",
+                            "Reactive Lymphadenitis" = "rLN",
+                            "Transformed Follicular Lymphoma" = "tFL"))
+```
+
+
+# Research question
+
+After a first evaluation we decided to examine the T-cell dysfunction in follicular lymphoma, we specifically wanted to address the following questions:
+
+* Is there an impaired function of T-cells in follicular lymphoma?
+* How frequently are T-cells impaired?
+* What is the cause of T-cell dysfunction? / How is the lymphoma affecting T-cell function?
+* Identification of new therapeutic ligand-receptor complexes
+
+
+# Workflow/Methods
+
+1. Data processing, QC metrics, etc.
+2. Data evaluation, UMAP by patient
+3. Celltype annotation & subannotation using *SingleR*
+4. Subsetting T-cells, data integration, 2nd data processing
+5. Calculation of different immunescores using *TIDEpy*
+6. Evaluation of cell cycle genes
+7. Evaluation of cell-cell interactions using *CellChat*
+
+
+# Results
+
+**(1) Data processing, QC metrics, etc.**
+
+We started by processing the data using the R library *Seurat* (@Hao2021), performing quality control, and choosing fitting cut-offs for the number of RNA features and percentage of mitochondrial reads. The cut-offs are displayed in the following figure.
+
+```{r, message=FALSE, warning=FALSE, results=FALSE, fig.show='hide'}
+process_lymphoma_data <- function(dataset) {
+  
+  lymphoma_types <- paste("./data/", dataset, sep="")
+  dir_list <- list.dirs(lymphoma_types)[2:length(list.dirs(lymphoma_types))]
+  
+  patient_id = c()
+  for (i in dir_list) {
+    id <- str_split(i,pattern="/")[[1]][[3]]
+    patient_id <- c(patient_id,id)
+  }
+  
+  data_list <- c()
+  for (i in 1: length(dir_list)) {
+    data_1 <- Read10X(dir_list[i])
+    data_2 <- CreateSeuratObject(counts=data_1, project=patient_id[i]) 
+    data_list <- c(data_list, data_2)
+  }
+  
+  sets <- c()
+  for (i in 2:length(data_list)){
+    sets <- c(sets, data_list[[i]])
+  }
+  
+  lymphoma.combined <- merge(data_list[[1]], y =sets, add.cell.ids=patient_id,
+                             project="all_lymphoma")
+
+  lymphoma.combined[["percent.mt"]] <- PercentageFeatureSet(lymphoma.combined,
+                                                            pattern="^MT-")
+
+  lyp_meta = lymphoma.combined@meta.data
+  p1 <- lyp_meta %>% 
+    ggplot(., aes(x=orig.ident, y=nFeature_RNA, color=orig.ident, fill= orig.ident))+
+    geom_jitter(aes(fill="black"), alpha=0.45, size =3, shape=21, colour="black",
+                position=position_jitterdodge(dodge.width=0.1,jitter.width=0.25))+
+    geom_violin(aes(), alpha=0.9) + theme_minimal() +
+    scale_fill_manual(values=c("cornflowerblue", "gray", "gray", "gray", "gray")) +
+    scale_color_manual(values=c("black", "black", "black", "black")) +
+    labs(x="")+
+    geom_hline(yintercept=200, linetype="dashed", color="red")+
+    geom_hline(yintercept=5500, linetype="dashed", color="red")+
+    theme(legend.position="none")
+  p2 <- lyp_meta %>% 
+    ggplot(aes(orig.ident, nCount_RNA, color=orig.ident, fill= orig.ident))+
+    geom_jitter(aes(fill="black"), alpha=0.45, size =3, shape=21, colour="black",
+                position=position_jitterdodge(dodge.width=0.1,jitter.width=0.25))+
+    geom_violin(aes(), alpha=0.9) + theme_minimal() +
+    scale_fill_manual(values=c("cornflowerblue", "gray", "gray", "gray", "gray")) +
+    scale_color_manual(values=c("black", "black", "black", "black")) +
+    labs(x="")+
+    theme(legend.position="none")
+  p3 <- lyp_meta %>% 
+    ggplot(aes(orig.ident, percent.mt, color=orig.ident, fill=orig.ident))+
+    geom_jitter(aes(fill="black"), alpha=0.45, size=3, shape=21, colour="black",
+                position=position_jitterdodge(dodge.width=0.1,jitter.width=0.25))+
+    geom_violin(aes(), alpha=0.9) + theme_minimal() +
+    scale_fill_manual(values=c("cornflowerblue", "gray", "gray", "gray", "gray")) +
+    scale_color_manual(values=c("black", "black", "black", "black")) +
+    labs(x="")+
+    geom_hline(yintercept=7, linetype="dashed", color="red")+
+    theme(legend.position="none")
+
+  qc_metrics <- ggarrange(p1,p2,p3, ncol=3, nrow=1)
+  
+  plot1 <- FeatureScatter(lymphoma.combined, feature1="nCount_RNA", feature2="percent.mt")
+  plot2 <- FeatureScatter(lymphoma.combined, feature1="nCount_RNA", feature2="nFeature_RNA")
+  feature_scatter<- plot1 + plot2
+
+  lymphoma <- subset(lymphoma.combined,subset=nFeature_RNA > 200 & nFeature_RNA < 5500 & percent.mt < 7)
+
+  lymphoma <- NormalizeData(lymphoma, normalization.method="LogNormalize", scale.factor=10000)
+
+  lymphoma <- FindVariableFeatures(lymphoma, selection.method="vst", nfeatures=2000)
+
+  top10 <- head(VariableFeatures(lymphoma), 10)
+
+  plot1 <- VariableFeaturePlot(lymphoma)
+  plot2 <- LabelPoints(plot=plot1, points=top10, repel=TRUE)
+  variable_features <- plot1 + plot2
+  
+  all.genes <- rownames(lymphoma)
+  lymphoma <- ScaleData(lymphoma, features=all.genes)
+
+  lymphoma <- RunPCA(lymphoma, features=VariableFeatures(object=lymphoma))
+
+  PCA_plot <- DimPlot(lymphoma, reduction="pca")
+
+# DimHeatmap(lymphoma, dims=1:15, cells=500, balanced=TRUE)
+
+  Elbowplot <- ElbowPlot(lymphoma)
+  
+  lymphoma <- FindNeighbors(lymphoma, dims=1:16)
+  lymphoma <- FindClusters(lymphoma, resolution=0.8)
+  lymphoma <- RunUMAP(lymphoma, dims=1:16)
+  
+  return(list("lymphoma" = lymphoma, "patient_id" = patient_id,
+              "qc_metrics" = qc_metrics, "feature_scatter" = feature_scatter,
+              "variable_features" = variable_features))
+}
+
+# specify dataset:
+#FL = follicular lymphoma
+#rLN = reactive lymph node
+
+dataset <- "FL"
+output <- process_lymphoma_data(dataset)
+```
+```{r, fig.height = 5, fig.width = 7}
+follicular_lymphoma <- output$lymphoma
+patient_id <- output$patient_id
+qc_metrics <- output$qc_metrics
+feature_scatter <- output$feature_scatter
+variable_features <- output$variable_features
+qc_metrics
+```
+
+
+**(2) Data evaluation, UMAP by patient**
+
+Then we plotted the first UMAP, coloring the cells by patient-ID.
+
+```{r, message=FALSE}
+# DimPlot(follicular_lymphoma, reduction="umap", pt.size=1)
+
+# extract UMAP information from seurat_object
+ump_data <- follicular_lymphoma@reductions$umap@cell.embeddings
+row_name <- rownames(ump_data)
+ump_data <- as.data.frame(ump_data)
+patient_name = c()
+for (i in row_name) {
+  name <- str_split(i,"\\_")[[1]][1]
+  patient_name <- c(patient_name,name)
+}
+
+ump_data$patient <- patient_name
+
+# UMAP plot by patient
+ump_data %>% 
+  filter(patient %in% patient_id) %>% 
+  ggplot(aes(UMAP_1,UMAP_2,color=patient)) +
+  geom_point(alpha=0.5) +
+  theme_classic()+
+  scale_color_manual(values=met.brewer("Signac", 12))+
+  guides(colour=guide_legend(override.aes=list(size=3, alpha=1)))
+```
+
+As you can see, we have one cluster per patient and multiple smaller cluster where the patients overlap. Patient 4 seems to have two independent clusters.
+
+
+**(3) Celltype annotation & subannotation**
+
+To understand where this comes from we used the library *SingleR* (@Aran2019) to annotate the celltypes.
+
+```{r, message=FALSE, warning=FALSE}
+library(SingleR)
+library(celldex)
+
+ref.data <- celldex::HumanPrimaryCellAtlasData(ensembl=F)
+
+predictions <- SingleR(test=follicular_lymphoma@assays$RNA@counts,
+                       assay.type.test=1, ref=ref.data,
+                       labels=ref.data$label.main)
+# table(predictions$labels)
+
+follicular_lymphoma$celltypes <- predictions$pruned.labels
+
+predictions_subann <- SingleR(test=follicular_lymphoma@assays$RNA@counts,
+                              assay.type.test=1, ref=ref.data,
+                              labels=ref.data$label.fine)
+# table(predictions_subann$labels)
+
+follicular_lymphoma$celltypes_spec <- predictions_subann$pruned.labels
+```
+```{r, fig.height = 5, fig.width = 8}
+# UMAP colored by celltype
+ump_data %>% ggplot(aes(UMAP_1, UMAP_2,color=follicular_lymphoma$celltypes)) +
+  geom_point(alpha=0.5) + theme_classic() +
+  scale_color_manual(values=met.brewer("Signac", 15))+
+  guides(colour=guide_legend(override.aes=list(size=3, alpha=1), title="celltype"))
+```
+
+The results from the celltype annotation with *SingleR* demonstrate that one independent cluster per patient consists only of B-cells and that the cluster with overlap between the patients consist of T-cells. The second independent cluster of patient 4 also shows to be a T-cell cluster.
+
+To validate the *SingleR* results for the celltype annotation, we used feature plots and a heatmap, colored with typical marker genes for B-cells (MS4A1 & CD19) and T-cells (CD3D & CD44).
+
+```{r}
+FeaturePlot(follicular_lymphoma, features=c("MS4A1", "CD19",  # B cell
+                                              "CD3D", "CD44"))  # T cell
+```
+
+```{r, message=FALSE, warning=FALSE, fig.height = 3, fig.width = 8}
+library(scater)
+
+follicular_lymphoma.sce <- as.SingleCellExperiment(follicular_lymphoma)
+
+plotHeatmap(follicular_lymphoma.sce, order_columns_by="celltypes",
+            features=c("MS4A1", "CD19", "CD3D", "CD44"))
+```
+
+Since the patients overlap only in T-cells we focused our subsequent analysis only on them. Interestingly, we found an overlap in T-cells also between different types of B-cell lymphoma. But since we were limited with our computational power we decided to work only on patients with follicular lymphoma.
+
+In the two following figures, we want to take a closer look now into the T-cells and their subtypes.
+
+```{r}
+pred_cell_df <- as.data.frame(predictions)
+pred_cell_df$sample_id <- row.names(pred_cell_df)
+
+pred_cell_spe_df <- as.data.frame(predictions_subann)
+pred_cell_spe_df$sample_id <- row.names(pred_cell_spe_df)
+
+cell_anno_list <- c()
+for(i in 1: dim(pred_cell_spe_df)[1]){
+  anno <- pred_cell_spe_df$pruned.labels[i]
+  temp <- str_split(anno, "\\:")[[1]][1]
+  cell_anno_list <- c(cell_anno_list,temp)
+}
+
+pred_cell_spe_df$cell_spec <- cell_anno_list
+pred_cell_spe_df <- pred_cell_spe_df %>% mutate(
+  anno_less=ifelse(grepl("T_cell", cell_spec), pruned.labels,cell_spec))
+
+# look only in T cell (by patient)
+ump_data %>%
+  mutate(sample_id=row.names(ump_data)) %>% 
+  left_join(pred_cell_spe_df, by="sample_id") %>% 
+  filter(cell_spec == "T_cell") %>%
+  ggplot(aes(UMAP_1,UMAP_2,color=patient)) +
+  geom_point(alpha=0.5) +
+  theme_classic()+
+  scale_color_manual(values=met.brewer("Signac", 4))+
+  guides(colour=guide_legend(override.aes=list(size=3, alpha=1)))
+```
+```{r, fig.height = 5, fig.width = 8}
+# look only in T cell (by celltype)
+p <- ump_data %>%
+  mutate(sample_id=row.names(ump_data)) %>% 
+  left_join(pred_cell_spe_df, by="sample_id") %>% 
+  filter(cell_spec == "T_cell") %>%
+  mutate(anno_1=ifelse(grepl("T_cell:CD4+", anno_less), "Th_cell",anno_less)) %>% 
+  mutate(anno_2=ifelse(grepl("T_cell:CD8+", anno_less), "Tox_cell",anno_1)) %>% 
+  mutate(anno_3=ifelse(grepl("T_cell:Treg", anno_less), "Treg_cell",anno_2))
+p %>% ggplot(aes(UMAP_1,UMAP_2,color=anno_3)) +
+  geom_point(alpha=0.5) +
+  theme_classic()+
+  scale_color_manual(values=met.brewer("NewKingdom", 5)) +
+  labs(color="cell type")+
+  guides(colour=guide_legend(override.aes=list(size=3, alpha=1), title="celltype"))
+```
+
+One can see that both big clusters consist of the same celltypes. We thus concluded that the inter-patient differences have to be calculated out to perform an analysis on one cluster for all patients.
+
+
+**(4) Subsetting T-cells, data integration, 2nd data processing**
+
+We thus subsetted the T-cells from our dataset, integrated them and processed the result once again using the same settings.
+
+```{r, message=FALSE, warning=FALSE, results=FALSE}
+follicular_lymphoma$celltypes_basic <- pred_cell_spe_df$cell_spec
+
+t_cells <- subset(x=follicular_lymphoma, subset=celltypes_basic == "T_cell")
+
+t_cells.list <- SplitObject(t_cells, split.by="orig.ident")
+
+t_cells.list <- lapply(X=t_cells.list, FUN=function(x) {
+  x <- NormalizeData(x)
+  x <- FindVariableFeatures(x, selection.method="vst", nfeatures=2000)
+})
+
+features <- SelectIntegrationFeatures(object.list=t_cells.list)
+
+t_cells.anchors <- FindIntegrationAnchors(object.list=t_cells.list, anchor.features=features)
+
+t_cells.integrated <- IntegrateData(anchorset=t_cells.anchors)
+
+DefaultAssay(t_cells.integrated) <- "integrated"
+
+all.genes <- rownames(t_cells.integrated)
+t_cells.integrated <- ScaleData(t_cells.integrated, features=all.genes)
+
+t_cells.integrated <- RunPCA(t_cells.integrated, features=VariableFeatures(object=t_cells.integrated))
+
+# DimPlot(t_cells.integrated, reduction="pca")
+# DimHeatmap(t_cells.integrated, dims=1:15, cells=500, balanced=TRUE)
+# ElbowPlot(t_cells.integrated)
+
+t_cells.integrated <- FindNeighbors(t_cells.integrated, dims=1:16)
+t_cells.integrated <- FindClusters(t_cells.integrated, resolution=0.8)
+t_cells.integrated <- RunUMAP(t_cells.integrated, dims=1:16)
+
+rm(t_cells.anchors, t_cells.list)
+
+# UMAP by patient
+ump_data_tc <- t_cells.integrated@reductions$umap@cell.embeddings
+row_name <- rownames(ump_data_tc)
+ump_data_tc <- as.data.frame(ump_data_tc)
+patient_name <- c()
+for (i in row_name) {
+  name <- str_split(i,"\\_")[[1]][1]
+  patient_name <- c(patient_name,name)
+}
+
+ump_data_tc$patient <- patient_name
+
+# UMAP plot
+ump_data_tc %>% 
+  filter(patient %in% patient_id) %>% 
+  ggplot(aes(UMAP_1,UMAP_2,color=patient)) +
+  geom_point(alpha = 0.5) +
+  theme_classic()+
+  scale_color_manual(values=met.brewer("Signac", 4))+
+  guides(colour=guide_legend(override.aes=list(size=3, alpha=1)))
+```
+
+```{r, fig.height = 5, fig.width = 8}
+# look only in T cell (by celltype)
+p <- ump_data_tc %>%
+  mutate(sample_id=row.names(ump_data_tc)) %>% 
+  left_join(pred_cell_spe_df, by="sample_id") %>% 
+  filter(cell_spec == "T_cell") %>%
+  mutate(anno_1=ifelse(grepl("T_cell:CD4+", anno_less), "Th_cell",anno_less)) %>% 
+  mutate(anno_2=ifelse(grepl("T_cell:CD8+", anno_less), "Tox_cell",anno_1)) %>% 
+  mutate(anno_3=ifelse(grepl("T_cell:Treg", anno_less), "Treg_cell",anno_2))
+p %>% ggplot(aes(UMAP_1,UMAP_2,color=anno_3)) +
+  geom_point(alpha=0.5) +
+  theme_classic()+
+  scale_color_manual(values=met.brewer("NewKingdom", 5)) +
+  labs(color="cell type")+
+  guides(colour=guide_legend(override.aes=list(size=3, alpha=1), title="celltype"))
+```
+
+After performing integration of the data and looking at the same plots again, one can clearly see that the cells from the different patients are now distributed evenly. Which means that we do not have any inter-patient differences in the data anymore. And that we can assign specific clusters for the T-cell subtypes.
+
+
+**(5) Calculation of different immunescores**
+
+Using this, we wanted to examine if and to what extend we have dysfunctional T-cells. For that we used the python library *TIDEpy* (@Jiang2018). To run the software, we had to export our data from *seurat* into an .csv-format and then use a python machine to run the analysis.
+
+```{r, eval=FALSE}
+df_scaled = data.frame(follicular_lymphoma@assays$RNA@counts)
+gene_name = rownames(df_scaled)
+mart <- useEnsembl(biomart = "ensembl", 
+                   dataset = "hsapiens_gene_ensembl", 
+                   mirror = "uswest")
+View(listAttributes(mart))
+genlist<- getBM(attributes = c("ensembl_gene_id", "hgnc_symbol","transcript_length"),
+                filters = "hgnc_symbol", 
+                values = gene_name,
+                mart = mart,
+                useCache = FALSE)
+genlist %>% 
+  group_by(hgnc_symbol) %>% 
+  top_n(1)%>% 
+  ungroup() -> genlist_2
+colnames(genlist_2)=c("gene_id","hgnc_symbol","transcript_length")
+genlist_2 %>% distinct(hgnc_symbol, .keep_all = T) -> genlist_2
+
+df_scale_flt = df_scaled[row.names(df_scaled) %in% genlist_2$hgnc_symbol,]
+
+# colname replacement
+col_name = c()
+for (i in colnames(df_scale_flt)) {
+  temp = gsub('\\.', '-', i)
+  col_name = c(col_name,temp)
+}
+colnames(df_scale_flt) = col_name
+df_scale_flt_cell  = df_scale_flt[,colnames(df_scale_flt) %in%cell_id ]
+dim(df_scale_flt_cell)
+
+# sapply and TPM transform
+tmp = function(x){
+  data = as.data.frame(x)
+  data$hgnc_symbol = row.names(df_scale_flt_cell)
+  data %>% left_join(genlist_2 ,by = "hgnc_symbol") ->data
+  x = data[,1]/data[,4]
+  return(x * 1e6 /sum(x))
+}
+
+tmp_trans = sapply(df_scale_flt_cell, tmp)
+tmp_log = log2(tmp_trans + 1)
+rownames(tmp_log) = rownames(df_scale_flt_cell)
+
+# save the T cell data
+write.csv(tmp_log, "lymphoma_tcell_scaled_flt.csv")
+```
+```{python, eval=FALSE}
+import pandas as pd
+from tidepy.pred import TIDE
+
+df = pd.read_csv("lymphoma_tcell_scaled_flt.csv", index_col=0)
+result = TIDE(df, cance='Other', pretreat=False, vthres=0)
+result.to_csv("immunescore.scv")
+```
+
+The result was then analyzed in *R*. We focused on two important scores, the dysfunction score and the immune evasion or exclusion score.
+
+```{r, message=FALSE, warning=FALSE}
+immune_score <- read.csv("./data/immunescore.csv")
+
+p <- ump_data[rownames(ump_data) %in% immune_score$X,]
+p <- ump_data_tc[rownames(ump_data_tc) %in% immune_score$X,]
+
+immune_tbl <- immune_score %>%
+  dplyr::rename(sample_id=X)
+
+p <- p %>% mutate(sample_id = row.names(p)) %>%
+  left_join(immune_tbl, by="sample_id") %>%
+  left_join(pred_cell_spe_df, by="sample_id")
+
+p %>% ggplot(aes(UMAP_1,UMAP_2, color=Exclusion)) +
+  geom_point(alpha=0.5) +
+  theme_classic() +
+  scale_color_gradient2(low = "blue", high = "red",mid = "white", midpoint = 0)
+```
+```{r}
+p %>% filter(cell_spec == "T_cell") %>%
+  mutate(anno_1=ifelse(grepl("T_cell:CD4+", anno_less), "Th_cell",anno_less)) %>%
+  mutate(anno_2=ifelse(grepl("T_cell:CD8+", anno_less), "Tox_cell",anno_1)) %>%
+  mutate(anno_3=ifelse(grepl("T_cell:Treg", anno_less), "Treg_cell",anno_2)) %>%
+  ggplot(aes(patient, Exclusion, color=anno_3)) +
+  geom_point(alpha=0.5, position=position_jitterdodge(dodge.width=0.1,jitter.width=0.9)) +
+  theme_classic() +
+  scale_color_manual(values=met.brewer("NewKingdom", 5)) +
+  labs(color="cell type")+
+  guides(colour=guide_legend(override.aes=list(size=3, alpha=1), title="celltype")) +
+  ylim(-1.5, 0.75) +
+  labs(x="", y="Exclusion")
+```
+
+```{r}
+p %>% ggplot(aes(UMAP_1,UMAP_2, color=Dysfunction)) +
+  geom_point(alpha=0.5) +
+  theme_classic() +
+  scale_color_gradient2(low = "blue", high = "red",mid = "white", midpoint = 0)
+```
+
+```{r}
+p %>%  filter(cell_spec == "T_cell") %>%
+  mutate(anno_1=ifelse(grepl("T_cell:CD4+", anno_less), "Th_cell",anno_less)) %>%
+  mutate(anno_2=ifelse(grepl("T_cell:CD8+", anno_less), "Tox_cell",anno_1)) %>%
+  mutate(anno_3=ifelse(grepl("T_cell:Treg", anno_less), "Treg_cell",anno_2)) %>%
+  ggplot(aes(patient, Dysfunction, color=anno_3)) +
+  geom_point(alpha=0.5, position=position_jitterdodge(dodge.width=0.1,jitter.width=0.9)) +
+  theme_classic() +
+  scale_color_manual(values=met.brewer("NewKingdom", 5)) +
+  labs(color="cell type")+
+  guides(colour=guide_legend(override.aes=list(size=3, alpha=1), title="celltype")) +
+  ylim(-1.5, 0.75) +
+  labs(x="", y="Dysfunction")
+```
+
+
+**(6) Evaluation of cell cycle genes**
+
+To validate, that the differences in celltypes and immunescores are not an artifact of cells at different stages in the cell cycle, we plotted several important cell cycle genes (PCNA, TOP2A, MCM6, MKI67) and used a UMAP to analyze in which phase of the cell cycle the cells are in.
+
+```{r, message=FALSE, warning=FALSE}
+# cell cycle arrest of T cells in the 
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+  
+T_cell_cycle <- CellCycleScoring(t_cells.integrated, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+
+RidgePlot(T_cell_cycle, features = c("PCNA", "TOP2A", "MCM6", "MKI67"), ncol = 2)
+```
+```{r, message=FALSE, warning=FALSE}
+T_cell_cycle <- RunPCA(T_cell_cycle, features = c(s.genes, g2m.genes))
+DimPlot(T_cell_cycle, pt.size=1)
+```
+
+The equally distributed cells from different stages in the cell cycle show us, that cell cycle genes do not have an effect on the clustering of the cells in the UMAP.
+
+
+**(7) Evaluation of cell-cell interactions**
+
+Then we started to evaluate cell-cell interactions using *CellChat* (@Jin2021a).
+
+```{r, message=FALSE, warning=FALSE, results=FALSE}
+library(CellChat)
+library(patchwork)
+options(stringsAsFactors = FALSE)
+
+# interaction analysis
+pred_cell_spe_df %>%
+  dplyr::select(anno_less) %>%
+  mutate(anno_1 = ifelse(grepl("T_cell:CD4+", anno_less), "Th cells",anno_less)) %>%
+  mutate(anno_2 = ifelse(grepl("T_cell:CD8+", anno_less), "Tox cells",anno_1)) %>%
+  mutate(anno_3 = ifelse(grepl("T_cell:Treg", anno_less), "Treg cells",anno_2)) %>%
+  mutate(anno_4 = ifelse(grepl("T_cell:gamma-delta", anno_less), "γδ-T cells",anno_3)) %>%
+  mutate(anno_5 = ifelse(grepl("Macrophage", anno_less), "MP",anno_4)) %>%
+  mutate(anno_6 = ifelse(grepl("Fibroblast", anno_less), "FB",anno_5)) %>%
+  mutate(anno_7 = ifelse(grepl("Endothelial_cells", anno_less), "EC",anno_6)) %>%
+  dplyr::select(anno_7) %>%
+  filter(!is.na(anno_7))-> meta_label
+
+# rename column called patient
+meta_label$patient <- str_sub(row.names(meta_label),1,3)
+
+# get lymphoma input data
+input_data <- follicular_lymphoma[,row.names(meta_label)]
+
+# create cellchat object
+cellchat <- createCellChat(object = input_data, meta = meta_label, group.by = "anno_7")
+
+# add cell information into metaslot of the object
+cellchat <- addMeta(cellchat, meta = meta_label)
+cellchat <- setIdent(cellchat, ident.use = "anno_7") # set "labels" as default cell identity
+levels(cellchat@idents) # show factor levels of the cell labels
+groupSize <- as.numeric(table(cellchat@idents)) # number of cells in each cell group
+
+# set the ligand-receptor interaction database
+CellChatDB <- CellChatDB.human
+showDatabaseCategory(CellChatDB)
+
+# use a subset of CellChatDB for cell-cell communication analysis
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling") # use Secreted Signaling
+# use all CellChatDB for cell-cell communication analysis
+# CellChatDB.use <- CellChatDB # simply use the default CellChatDB
+
+# set the used database in the object
+cellchat@DB <- CellChatDB.use
+
+# Preprocessing the expression data for cell-cell communication analysis
+cellchat <- subsetData(cellchat) # This step is necessary even if using the whole database
+future::plan("multiprocess", workers = 4) # do parallel
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+
+# Part II: Inference of cell-cell communication network
+# Compute the communication probability and infer cellular communication network
+cellchat <- computeCommunProb(cellchat)
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+# Infer the cell-cell communication at a signaling pathway level
+cellchat <- computeCommunProbPathway(cellchat)
+
+# Calculate the aggregated cell-cell communication network
+cellchat <- aggregateNet(cellchat)
+
+groupSize <- as.numeric(table(cellchat@idents))
+par(mfrow = c(1,2), xpd=TRUE)
+```
+
+We wanted to focus again on B- & T-cells, since we do not have a sufficient number of (e.g.) monocytes NK-cells etc.
+
+```{r, message=FALSE, warning=FALSE}
+netVisual_circle(cellchat@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+```
+```{r, message=FALSE, warning=FALSE}
+netVisual_circle(cellchat@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strengths")
+```
+```{r, message=FALSE, warning=FALSE}
+mat <- cellchat@net$weight
+
+mat <- mat[c(1, 5, 11, 12, 14), c(1, 5, 11, 12, 14)]
+
+par(mfrow = c(1,4), xpd=TRUE)
+for (i in c(1, 3, 4, 5)) {
+  mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), dimnames = dimnames(mat))
+  mat2[i, ] <- mat[i, ]
+  netVisual_circle(mat2, vertex.weight = groupSize, weight.scale = T, edge.weight.max = max(mat), title.name = rownames(mat)[i])
+}
+```
+```{r, message=FALSE, warning=FALSE}
+mat <- cellchat@net$count
+
+mat <- mat[c(1, 5, 11, 12, 14), c(1, 5, 11, 12, 14)]
+
+par(mfrow = c(1,4), xpd=TRUE)
+for (i in c(1, 3, 4, 5)) {
+  mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), dimnames = dimnames(mat))
+  mat2[i, ] <- mat[i, ]
+  netVisual_circle(mat2, vertex.weight = groupSize, weight.scale = T, edge.weight.max = max(mat), title.name = rownames(mat)[i])
+}
+```
+
+*CellChat* can also give us genes which are responsible for the interactions. In our context this means, that those genes are from pathways which are highly active. We are looking into one example closer in the following.
+
+```{r}
+# pathway activation
+cellchat@netP$pathways
+pathways.show <- c("IL16")
+vertex.receiver = seq(1,4) # a numeric vector.
+netVisual_aggregate(cellchat, signaling = pathways.show,  vertex.receiver = vertex.receiver)
+```
+
+
+# Conclusion/Discussion
+
+Follicular lymphoma (FL) is one of the most common types of low-grade non-Hodgkin lymphoma. Relapse of FL occurs commonly in clinics. Thus, finding novel therapeutic target with low toxicity in treating FL patients is of urgency. Our study focuses mainly on dissecting single cell sequencing dataset from FL patients to reveal the immune cell dysfunction or exclusion in FL patent, thereby identifying the potential immunotherapeutic targets.
+T cells take part in a variety of immune response. However, in cancer, T cells become dysfunctional owing to persistent antigen exposure. Also, aberrant presenting of chemokines or cytokines is relevant to T cell absence, exclusion and exhaustion. From our single cell data analysis, we revealed that T helper cells and cytotoxic T cells in FL patients are highly dysfunctional. By analyzing the cellular interaction between cancer cells and immune cell, we found (e.g.) IL16 ligand pathway is highly activated among the patients. Overexposure of IL16 is correlated to immune dysfunction or immune exhaustion in many cancers (@Ogasawara1999). Furthermore, interferons (like IFN-II) were found to increase immune evasion in cancers (@Zhang2020). This could explain the phenotype of immune cells we identified in FL patients.
+
+Furthermore, we identified a subcluster of T helper cells characterizing high immune exclusion. Immune exclusion reduces T helper cell infiltration in cancer, and it may result in partially inactivation of toxicity T cell. That could impair the tumor killing effects overall. Chemokines, a subcategory of cytokines, provide the chemotactic signals for immune cell trafficking to specific destinations. Although several chemokines are positive signals of T-cell infiltration, there are still many negative messages for effector T-cell chemotaxis. In order to identify the negative regulatory chemokines resulting in T helper exclusion, we analyzed ligand and receptor interaction between tumor cells and immune cells. We found there are several candidate pathways active and those activated pathways could correlate to T helper cell exclusion in the patients. In future, we could design or use small molecule to interrupt the negative regulatory ligand-receptor interaction, thereby reactivating T helper cell infiltration and enhancing tumor elimination.
+
+In summary, single cell sequencing brings a novel view in identifying immune cell heterogeneity in the cancer, which shed a light in clinics on discovering novel immunotherapeutic targets for treating cancer patients.  Meanwhile, it would also be helpful in exploiting complicated cancer microenvironment and clarify the mechanism of cancer relapse and other cancer activities.
+
+
+<style>
+body {
+text-align: left}
+</style>
+# References
